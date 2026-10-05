@@ -139,7 +139,8 @@ interface ExistingOrderForCancellation {
   id: string;
   status: string;
   stockDeducted: boolean;
-  items: { variantId: string; quantity: number }[];
+  /** `variantId` es null si el producto se eliminó después ("Eliminar producto") — esa línea ya no tiene stock que mover. */
+  items: { variantId: string | null; quantity: number }[];
 }
 
 /**
@@ -195,6 +196,7 @@ async function applyCancellationToExistingOrder(
     // El canal repuso el stock al cancelar — se revierte el descuento local y se empuja a los demás canales.
     const allResults: PushChannelResult[] = [];
     for (const item of existing.items) {
+      if (!item.variantId) continue; // producto eliminado: nada que sincronizar
       await applyInventoryMovement(item.variantId, location.id, item.quantity, {
         type: "cancelacion_reposicion",
         referenceType: "order",
@@ -212,6 +214,7 @@ async function applyCancellationToExistingOrder(
     // se deja la rama por completitud/robustez ante cualquier secuencia rara de eventos.
     const allResults: PushChannelResult[] = [];
     for (const item of existing.items) {
+      if (!item.variantId) continue; // producto eliminado: nada que sincronizar
       await applyInventoryMovement(item.variantId, location.id, -item.quantity, {
         type: "cancelacion_sin_reposicion",
         referenceType: "order",
@@ -275,8 +278,18 @@ export async function ingestShopifyOrders(
         if (existing.lastSyncErrorCode && NON_AUTO_RETRIABLE_ERROR_CODES.has(existing.lastSyncErrorCode)) {
           ordersRetrySkipped += 1;
         } else {
-          await retryOrderSync(existing.id, pushClients);
-          ordersRetried += 1;
+          try {
+            await retryOrderSync(existing.id, pushClients);
+            ordersRetried += 1;
+          } catch (err) {
+            // Un pedido que no se puede reintentar NO debe frenar a los demás ni hacer fallar toda la pasada.
+            ordersRetrySkipped += 1;
+            await updateOrderSyncStatus(
+              existing.id,
+              "error",
+              `No se pudo reintentar: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+            );
+          }
         }
       }
       continue;
@@ -451,8 +464,18 @@ export async function ingestMercadoLibreOrders(
         if (existing.lastSyncErrorCode && NON_AUTO_RETRIABLE_ERROR_CODES.has(existing.lastSyncErrorCode)) {
           ordersRetrySkipped += 1;
         } else {
-          await retryOrderSync(existing.id, pushClients);
-          ordersRetried += 1;
+          try {
+            await retryOrderSync(existing.id, pushClients);
+            ordersRetried += 1;
+          } catch (err) {
+            // Un pedido que no se puede reintentar NO debe frenar a los demás ni hacer fallar toda la pasada.
+            ordersRetrySkipped += 1;
+            await updateOrderSyncStatus(
+              existing.id,
+              "error",
+              `No se pudo reintentar: ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+            );
+          }
         }
       }
       continue;
@@ -656,6 +679,7 @@ export async function resolveOrderCancellation(
 
   if (restocked && order.stockDeducted) {
     for (const item of order.items) {
+      if (!item.variantId) continue; // producto eliminado: nada que sincronizar
       await applyInventoryMovement(item.variantId, location.id, item.quantity, {
         type: "cancelacion_reposicion",
         referenceType: "order",
@@ -666,6 +690,7 @@ export async function resolveOrderCancellation(
     newStockDeducted = false;
   } else if (!restocked && !order.stockDeducted) {
     for (const item of order.items) {
+      if (!item.variantId) continue; // producto eliminado: nada que sincronizar
       await applyInventoryMovement(item.variantId, location.id, -item.quantity, {
         type: "cancelacion_sin_reposicion",
         referenceType: "order",
@@ -823,6 +848,7 @@ export async function retryOrderSync(
   const originChannelCode = order.channel?.code ?? null;
   const allResults: PushChannelResult[] = [];
   for (const item of order.items) {
+    if (!item.variantId) continue; // producto eliminado: nada que sincronizar
     const results = await pushStockToOtherChannels(item.variantId, originChannelCode, pushClients);
     allResults.push(...results);
   }
