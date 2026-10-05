@@ -1,0 +1,76 @@
+# Sincronización 24/7 de pedidos y stock entre Shopify y Mercado Libre, sin
+# depender del PC: cada ~15 min GitHub prende un contenedor, corre UNA pasada de
+# `apps/cloud-worker` (la misma lógica de sondeo de la app de escritorio, contra
+# la misma base de datos) y lo apaga.
+#
+# SEGURIDAD: este workflow solo se dispara por `schedule` y a mano
+# (`workflow_dispatch`) — NUNCA por pull requests ni forks, así que nadie ajeno
+# puede hacerlo correr con sus propios datos. Los secretos (claves de Shopify y
+# Mercado Libre, conexión a la base) viven en "Repository secrets" de GitHub:
+# encriptados, no aparecen en el código ni en los registros.
+#
+# Si una corrida falla, GitHub avisa por correo a la cuenta dueña del repo.
+name: Sincronizar pedidos y stock
+
+on:
+  schedule:
+    # GitHub no garantiza el minuto exacto y puede demorar bajo carga alta.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+# Nunca dos corridas del worker a la vez (si una demora, la siguiente espera).
+concurrency:
+  group: sync-orders
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Solo para el último paso (mantener activo el cron, ver más abajo).
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --ignore-scripts: no compila módulos nativos que el worker no usa (p. ej. keytar, la bóveda de Windows).
+      - name: Instalar dependencias
+        run: pnpm install --filter @blacksand/cloud-worker... --no-frozen-lockfile --ignore-scripts
+
+      - name: Generar cliente de base de datos
+        run: pnpm --filter @blacksand/db exec prisma generate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Sincronizar pedidos y stock
+        run: pnpm --filter @blacksand/cloud-worker start
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SHOPIFY_SHOP_DOMAIN: ${{ secrets.SHOPIFY_SHOP_DOMAIN }}
+          SHOPIFY_API_VERSION: ${{ secrets.SHOPIFY_API_VERSION }}
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          MELI_CLIENT_ID: ${{ secrets.MELI_CLIENT_ID }}
+          MELI_CLIENT_SECRET: ${{ secrets.MELI_CLIENT_SECRET }}
+          MELI_REDIRECT_URI: ${{ secrets.MELI_REDIRECT_URI }}
+
+      # GitHub desactiva solo los cron de repositorios sin actividad por 60 días.
+      # Este paso (mejor esfuerzo; si falla, no rompe la corrida) vuelve a
+      # "habilitar" el workflow en cada pasada para intentar mantenerlo activo.
+      - name: Mantener activo el cron
+        if: always()
+        continue-on-error: true
+        run: gh api --method PUT "repos/${{ github.repository }}/actions/workflows/sync-orders.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}
