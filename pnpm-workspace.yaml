@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "packages/connectors/*"
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  electron: true
+  esbuild: true
+  keytar: true
+  prisma: true

@@ -1,0 +1,37 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.env
+.env.local
+packages/db/prisma/*.db
+packages/db/prisma/*.db-journal
+.DS_Store
+*.tsbuildinfo
+
+# --- Seguridad: este repositorio es PÚBLICO. Nunca subir claves ni datos reales. ---
+.env.*
+!.env.example
+# Archivos locales con cadenas de conexión / claves (migración a Supabase, etc.)
+scripts/migrate-to-supabase/
+**/local-config.txt
+**/*.local.txt
+**/*.local.json
+**/db-connection*.txt
+# Bases de datos locales (SQLite viejas) y copias de respaldo
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.bak
+# Datos de usuario de la app (config.json, bóveda de desarrollo)
+config.json
+**/vault*.json
+**/userData/
+
+# Archivos generados al compilar la app (no son código fuente; se regeneran solos)
+out/
+**/out/
+.vite/
+coverage/

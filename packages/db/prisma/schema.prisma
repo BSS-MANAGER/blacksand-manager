@@ -1,0 +1,645 @@
+// BLACK SAND Manager — esquema de base de datos (sección E de la especificación).
+// Migrado de SQLite (archivo local) a PostgreSQL (Supabase) para la
+// sincronización 24/7 independiente del PC (ver scripts/migrate-to-supabase).
+// IDs como TEXT/UUID (no autoincrementales), acceso encapsulado detrás de
+// repositorios (ver packages/db/src/repositories).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Catálogo maestro -------------------------------------------------
+
+model Product {
+  id          String   @id @default(uuid())
+  sku         String   @unique
+  barcode     String?
+  name        String
+  description String?
+  brand       String?
+  category    String?
+  weight      Float?
+  lengthCm    Float?
+  widthCm     Float?
+  heightCm    Float?
+  baseCost    Float?
+  basePrice   Float?
+  /// borrador | publicado | pausado | con_error (estado central, distinto del estado por canal)
+  status      String   @default("borrador")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  variants          ProductVariant[]
+  images            ProductImage[]
+  channelMap        ChannelProductMap[]
+  channelSyncStatus ChannelSyncStatus[]
+
+  @@index([barcode])
+}
+
+model ProductVariant {
+  id              String  @id @default(uuid())
+  productId       String
+  skuVariant      String  @unique
+  barcodeVariant  String?
+  size            String?
+  color           String?
+  cost            Float?
+  price           Float?
+  weightOverride  Float?
+
+  product        Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  images         ProductImage[]
+  inventoryItems InventoryItem[]
+  channelMap     ChannelProductMap[]
+  orderItems     OrderItem[]
+
+  @@index([productId])
+  @@index([barcodeVariant])
+}
+
+model ProductImage {
+  id        String  @id @default(uuid())
+  productId String
+  variantId String?
+  url       String
+  localPath String?
+  position  Int     @default(0)
+
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+}
+
+// --- Inventario multi-bodega -------------------------------------------
+
+model Location {
+  id        String  @id @default(uuid())
+  name      String
+  address   String?
+  isDefault Boolean @default(false)
+
+  inventoryItems InventoryItem[]
+}
+
+model InventoryItem {
+  id                 String  @id @default(uuid())
+  variantId          String
+  locationId         String
+  quantityOnHand     Int     @default(0)
+  quantityCommitted  Int     @default(0)
+  safetyStock        Int     @default(0)
+
+  variant  ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  location Location       @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  movements InventoryMovement[]
+
+  @@unique([variantId, locationId])
+}
+
+/// quantityAvailable = quantityOnHand - quantityCommitted - safetyStock (calculado en la capa de dominio, no persistido).
+model InventoryMovement {
+  id              String   @id @default(uuid())
+  inventoryItemId String
+  /// venta_presencial | venta_online | ajuste | ingreso | merma |
+  /// cancelacion_reposicion (pedido cancelado, el stock vuelve a estar
+  /// disponible) | cancelacion_sin_reposicion (pedido cancelado pero el
+  /// producto igual salió del inventario — mismo efecto neto que una venta,
+  /// tipo aparte solo para que quede claro en la auditoría) — ver
+  /// "Cancelaciones de pedidos" en `packages/sync-engine/src/orders.ts`.
+  type            String
+  quantityDelta   Int
+  referenceType   String?
+  referenceId     String?
+  userId          String?
+  createdAt       DateTime @default(now())
+
+  inventoryItem InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  user          User?         @relation(fields: [userId], references: [id])
+
+  @@index([inventoryItemId])
+}
+
+// --- Canales y credenciales ---------------------------------------------
+
+model Channel {
+  id           String  @id @default(uuid())
+  /// shopify | mercadolibre | meta
+  code         String  @unique
+  name         String
+  isActive     Boolean @default(false)
+  /// JSON con la tabla de capacidades declaradas (sección D.4)
+  capabilities String
+
+  credentials  ChannelCredential[]
+  productMap   ChannelProductMap[]
+  syncStatus   ChannelSyncStatus[]
+  syncQueue    SyncQueue[]
+  orders       Order[]
+  abandoned    AbandonedCheckout[]
+}
+
+/// El valor del token NUNCA se guarda aquí: credentialRef apunta a la bóveda
+/// del sistema operativo (keytar / Windows Credential Manager). Ver D.5 y
+/// packages/credentials.
+model ChannelCredential {
+  id             String    @id @default(uuid())
+  channelId      String
+  credentialRef  String    @unique
+  tokenExpiresAt DateTime?
+  scopes         String?
+  status         String    @default("pendiente")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId])
+}
+
+model ChannelProductMap {
+  id              String    @id @default(uuid())
+  productId       String?
+  variantId       String?
+  channelId       String
+  channelProductId String
+  channelVariantId String?
+  channelSku      String?
+  lastSyncedAt    DateTime?
+  /// sincronizado | pendiente | error | conflicto
+  syncStatus      String    @default("pendiente")
+  lastError       String?
+  /// A pedido del usuario: código corto del error (catálogo en
+  /// `@blacksand/shared`, `sync-error-codes.ts`, ej. "EN_REVISION" |
+  /// "ERROR") — la UI lo muestra como badge compacto en vez del texto
+  /// completo de `lastError`, que ahora se ve aparte (detalle que se abre
+  /// a pedido, no siempre visible en la tabla). `null` mientras
+  /// `syncStatus !== "error"`.
+  lastErrorCode   String?
+  /// Estado REAL de la publicación tal cual lo reporta el canal (para
+  /// Mercado Libre: "active" | "paused" | "closed" | "under_review" |
+  /// "inactive" | "payment_required", el valor crudo de la API sin
+  /// traducir) — OJO, esto es distinto de `syncStatus` de arriba, que es
+  /// si ESTA APP logró empujar su último cambio al canal, no si la
+  /// publicación sigue viva del lado de Mercado Libre. Se agregó porque
+  /// el importador nunca guardaba esto — un producto emparejado por SKU
+  /// se veía "sincronizado" en Productos aunque Mercado Libre ya hubiera
+  /// pausado o cerrado esa publicación por su cuenta. `null` = todavía no
+  /// se revisó con esta versión de la app (correr "Importar de Mercado
+  /// Libre" para poblarlo). Se llena solo para el canal `mercadolibre`
+  /// por ahora.
+  listingStatus   String?
+  /// Motivos que el canal asocia al estado (`sub_status` de Mercado
+  /// Libre, ej. `["out_of_stock"]`) — guardado como JSON string (array).
+  /// Puede venir `"[]"` aunque la publicación esté pausada/cerrada:
+  /// Mercado Libre no siempre expone el motivo por API pública (ver la
+  /// nota grande en `packages/sync-engine/src/meli-listing-status.ts`).
+  listingSubStatus String?
+  listingStatusCheckedAt DateTime?
+
+  product Product?        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  channel Channel         @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, channelProductId, channelVariantId])
+  @@index([variantId])
+}
+
+/// Vista agregada por producto+canal para el dashboard de sincronización (módulo 5).
+model ChannelSyncStatus {
+  id           String    @id @default(uuid())
+  productId    String
+  channelId    String
+  /// sincronizado | pendiente | error | conflicto
+  status       String    @default("pendiente")
+  stockDiff    Int       @default(0)
+  lastSyncedAt DateTime?
+  lastError    String?
+  /// Código corto del error — mismo criterio que `ChannelProductMap.lastErrorCode`.
+  lastErrorCode String?
+  retries      Int       @default(0)
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, channelId])
+}
+
+// --- Clientes y pedidos (Fase 3 en adelante; esquema preparado desde Fase 1) ---
+
+model Customer {
+  id            String   @id @default(uuid())
+  name          String?
+  document      String?
+  email         String?
+  phone         String?
+  address       String?
+  sourceChannel String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orders             Order[]
+  abandonedCheckouts AbandonedCheckout[]
+}
+
+model Order {
+  id             String   @id @default(uuid())
+  /// null = venta presencial (POS)
+  channelId      String?
+  /// único por canal, para idempotencia (F.3)
+  channelOrderId String?
+  /// Fase 3d: número de pedido tal cual lo reconoce el usuario en la tienda
+  /// de origen — en Shopify es el "name" del pedido (ej. "#1023", distinto
+  /// del `channelOrderId`, que ahí es un GID interno tipo
+  /// "gid://shopify/Order/123..."); en Mercado Libre no hace falta guardarlo
+  /// aparte porque el `channelOrderId` YA ES el número que Mercado Libre le
+  /// muestra al vendedor como número de venta. Null en ventas de mostrador y
+  /// en pedidos ingresados antes de que existiera este campo (no se puede
+  /// recuperar retroactivamente sin volver a consultar el canal).
+  orderNumber    String?
+  orderDate      DateTime @default(now())
+  customerId     String?
+  /// pendiente | recibido | completada | cancelado
+  status         String   @default("pendiente")
+  subtotal       Float    @default(0)
+  discounts      Float    @default(0)
+  taxes          Float    @default(0)
+  total          Float    @default(0)
+  paymentMethod  String?
+  syncStatus     String   @default("pendiente")
+  /// Fase 3g: detalle legible del último intento de empujar el stock de
+  /// este pedido a los demás canales (ej. "mercadolibre: Request failed
+  /// with status 401") — `null` mientras nunca hubo error, o después de
+  /// un reintento exitoso. Mismo patrón que `ChannelSyncStatus.lastError`,
+  /// pero a nivel de pedido: un pedido puede tener varias líneas/variantes,
+  /// así que agrega los errores de todas las líneas que fallaron en el
+  /// último intento (ver `summarizePushErrors` en `@blacksand/sync-engine`).
+  lastSyncError  String?
+  /// A pedido del usuario: código(s) corto(s) del error, mismo formato que
+  /// `lastSyncError` pero con el código en vez del texto completo (ver
+  /// `summarizePushErrorCodes` en `@blacksand/sync-engine` y el catálogo en
+  /// `@blacksand/shared/sync-error-codes.ts`) — lo que el Dashboard
+  /// muestra como badge; `lastSyncError` queda como el detalle completo,
+  /// disponible aparte.
+  lastSyncErrorCode String?
+
+  /// --- Cancelaciones de pedidos (Fase 3c) ---------------------------------
+  /// Motivado por un pedido real: el usuario cancela un pedido en la tienda
+  /// (Shopify o Mercado Libre) y necesita que la app lo refleje como
+  /// cancelado Y sincronice el stock según haya elegido "reponer" o "no
+  /// reponer" en la propia tienda al cancelar. Ver el comentario grande en
+  /// `packages/sync-engine/src/orders.ts` para la lógica completa — resumen
+  /// de estos campos:
+  /// cuándo se detectó/procesó la cancelación — null mientras no está cancelado.
+  cancelledAt   DateTime?
+  /// true = el stock volvió a estar disponible (se repuso); false = el
+  /// producto salió igual del inventario (no se repuso); null = TODAVÍA NO
+  /// SE SABE, pedido cancelado pendiente de que el usuario elija "reponer"/
+  /// "no reponer" a mano (hoy: siempre los de Mercado Libre, que no expone
+  /// esta información por API — a diferencia de Shopify, que sí la trae en
+  /// el propio pedido cancelado vía los `refundLineItems.restockType`).
+  restocked     Boolean?
+  /// Motivo de cancelación tal cual lo reporta el canal (hoy solo Shopify:
+  /// `cancelReason` crudo — CUSTOMER/DECLINED/FRAUD/INVENTORY/OTHER/STAFF).
+  /// Solo para mostrar en pantalla, ninguna decisión depende de este campo.
+  cancelReason  String?
+  /// true = el stock de este pedido YA está descontado en la base local
+  /// (el caso normal desde que se ingresa un pedido activo). Se usa para que
+  /// aplicar/revertir una reposición sea idempotente — sabe si ya hizo el
+  /// movimiento de inventario correspondiente o no, sin tener que inferirlo.
+  stockDeducted Boolean  @default(true)
+
+  channel  Channel?  @relation(fields: [channelId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  items    OrderItem[]
+  posSale  PosSale?
+
+  @@unique([channelId, channelOrderId])
+}
+
+model OrderItem {
+  id          String @id @default(uuid())
+  orderId     String
+  /// Nullable a partir de "Eliminar producto" (a pedido del usuario): al
+  /// forzar el borrado de un producto con historial de ventas, la variante
+  /// desaparece y este campo queda en NULL (`onDelete: SetNull`) en vez de
+  /// bloquear el borrado — ver `deleteProduct` en @blacksand/db.
+  variantId   String?
+  quantity    Int
+  unitPrice   Float
+  unitCost    Float?
+  margin      Float?
+  /// Copia de `variant.skuVariant`/`product.name` tomada justo antes de un
+  /// borrado forzado — para que el historial de pedidos siga mostrando qué
+  /// se vendió aunque el producto ya no exista en el catálogo. `null`
+  /// mientras el producto siga vivo (ahí se lee `variant` directamente).
+  skuSnapshot         String?
+  productNameSnapshot String?
+
+  order   Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+}
+
+model PosSale {
+  id           String  @id @default(uuid())
+  orderId      String  @unique
+  userId       String?
+  observations String?
+  paymentMethod String?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User? @relation(fields: [userId], references: [id])
+}
+
+/// Fase 3f: contador correlativo genérico que la propia app asigna (hoy solo
+/// ventas de mostrador, `key: "venta_presencial"` → se formatea como
+/// "VP-#0001", ver `formatVentaPresencialNumber` en `@blacksand/core-domain`).
+/// Un registro por `key`; el valor se incrementa con una sola sentencia
+/// atómica (`update: { value: { increment: 1 } }`), así que dos ventas
+/// registradas casi al mismo tiempo nunca reciben el mismo número.
+model SequenceCounter {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// --- Carritos abandonados y recuperación (Fase 4) ------------------------
+
+model AbandonedCheckout {
+  id               String   @id @default(uuid())
+  channelId        String
+  channelCheckoutId String  @unique
+  customerId       String?
+  customerEmail    String?
+  customerName     String?
+  lineItems        String
+  total            Float
+  createdAt        DateTime @default(now())
+  recovered        Boolean  @default(false)
+  emailSentAt      DateTime?
+
+  channel  Channel   @relation(fields: [channelId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  recoveryEmails RecoveryEmail[]
+}
+
+model RecoveryEmail {
+  id                  String    @id @default(uuid())
+  abandonedCheckoutId String
+  sentAt              DateTime?
+  openedAt            DateTime?
+  status              String    @default("pendiente")
+  templateUsed        String?
+
+  abandonedCheckout AbandonedCheckout @relation(fields: [abandonedCheckoutId], references: [id], onDelete: Cascade)
+}
+
+// --- Motor de sincronización ----------------------------------------------
+
+model SyncQueue {
+  id          String    @id @default(uuid())
+  taskType    String
+  channelId   String
+  entityType  String
+  entityId    String
+  payload     String
+  /// pending | in_progress | success | error | dead_letter
+  status      String    @default("pending")
+  attempts    Int       @default(0)
+  nextRetryAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  channel Channel   @relation(fields: [channelId], references: [id])
+  logs    SyncLog[]
+
+  @@index([status])
+}
+
+model SyncLog {
+  id               String   @id @default(uuid())
+  syncQueueId      String?
+  timestamp        DateTime @default(now())
+  level            String   @default("info")
+  message          String
+  responseSnapshot String?
+
+  syncQueue SyncQueue? @relation(fields: [syncQueueId], references: [id], onDelete: SetNull)
+}
+
+// --- Auditoría y usuarios ---------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String?
+  before     String?
+  after      String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+}
+
+model User {
+  id           String  @id @default(uuid())
+  name         String
+  email        String  @unique
+  /// admin | vendedor
+  role         String  @default("vendedor")
+  passwordHash String?
+
+  inventoryMovements InventoryMovement[]
+  posSales           PosSale[]
+  auditLogs          AuditLog[]
+}
+
+// --- Publicar en Mercado Libre (Fase 2b) --------------------------------
+
+/// Mercado Libre exige categoría + atributos específicos por categoría al
+/// crear una publicación (no es un simple nombre+precio) — en vez de
+/// resolverlo producto por producto (304 productos de Shopify), se agrupa
+/// por `groupKey` (el `Product.category` central, heredado del product_type
+/// de Shopify) y se confirma la categoría/atributos UNA VEZ por grupo desde
+/// la pantalla "Publicar en ML". `publishBatch` (sync-engine) reusa este
+/// mapeo para cada producto del grupo.
+model MeliCategoryGroupMapping {
+  id             String    @id @default(uuid())
+  /// `product.category` tal cual (o `sku:<sku>` para productos sin
+  /// categoría, que quedan como su propio grupo de 1).
+  groupKey       String    @unique
+  categoryId     String
+  categoryName   String
+  listingTypeId  String
+  /// JSON: { id: string; valueId?: string; valueName: string }[] — respuestas
+  /// del usuario para atributos requeridos de la categoría que no se pueden
+  /// inferir por producto (ej. "Línea", "Modelo" con lista fija de valores).
+  attributeDefaults String @default("[]")
+  /// Detectados al leer los atributos de la categoría (no hardcodeados):
+  /// el atributo "hermano" que declara "sin GTIN" para esta categoría, si
+  /// existe. Se aplica por producto solo cuando ese producto no tiene
+  /// `barcode` propio.
+  emptyGtinAttributeId   String?
+  emptyGtinValueId       String?
+  emptyGtinValueName     String?
+  /// El usuario pidió esto para productos ajustables de una sola talla
+  /// (ej. chalecos tácticos) que a veces igual traen algo cargado en el
+  /// campo "Talla"/"Tamaño" de Shopify (por costumbre del catálogo, no
+  /// porque tengan tallas reales) — cuando es `true`,
+  /// `buildCreateItemPayload` (@blacksand/core-domain) IGNORA esa talla de
+  /// Shopify para todos los productos del grupo y publica siempre
+  /// "Standard", en vez del criterio por defecto (usar la talla de Shopify
+  /// cuando el producto la tiene). `false` por defecto — mismo criterio de
+  /// siempre para el resto de las categorías.
+  forceStandardSize Boolean @default(false)
+  /// Color a usar cuando un producto de este grupo NO tiene color cargado
+  /// en Shopify (o su color no matchea ningún valor de la lista fija de la
+  /// categoría) — mismo patrón que `emptyGtinValueId`/`emptyGtinValueName`
+  /// arriba. Encontrado con un caso real: "BARRIGUERA CON CINTURON" cayó en
+  /// una categoría que exige el atributo COLOR, pero el producto no tiene
+  /// color cargado en Shopify, y Mercado Libre rechazó la publicación
+  /// (`item.attributes.missing_required`, atributo COLOR) — antes de este
+  /// campo, `buildCreateItemPayload` simplemente omitía el atributo si no
+  /// había color de Shopify, dejando que la API lo rechazara recién al
+  /// publicar. Ahora, cuando la categoría EXIGE color y el producto no trae
+  /// uno propio, se usa este default si está configurado; si no está
+  /// configurado, `buildCreateItemPayload` devuelve un error claro ANTES de
+  /// llamar a la API (mismo criterio que "sin marca"/"sin precio"/"sin
+  /// imágenes"). `null` = no hay default configurado para este grupo.
+  defaultColorValueId   String?
+  defaultColorValueName String?
+  confirmedAt    DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+/// La predicción automática de categoría de Mercado Libre puede fallar de
+/// forma sorprendente para un catálogo de nicho (confirmado con una
+/// "bandana táctica" real, predicha en "Artículos deportivos > Bastones").
+/// Esta tabla guarda, una vez por tipo de producto, la categoría REAL que
+/// el usuario verificó a mano (`keyword` -> `categoryId`/`categoryName`) —
+/// `previewCategoryForGroup` (sync-engine) la usa ANTES de preguntarle a
+/// Mercado Libre cuando el texto de búsqueda contiene esa palabra clave, y
+/// "Publicar todo automáticamente" solo confirma sola una categoría nueva
+/// cuando hay una coincidencia acá (ver `findKeywordOverride` en
+/// @blacksand/core-domain) — sin coincidencia, ese grupo queda para
+/// revisión manual en vez de arriesgarse a una predicción de texto mala.
+model MeliCategoryKeywordOverride {
+  id           String   @id @default(uuid())
+  /// Texto a buscar (sin mayúsculas/tildes) dentro del nombre del producto
+  /// o del grupo — ej. "bandana". Único para no guardar la misma palabra
+  /// dos veces con categorías distintas.
+  keyword      String   @unique
+  categoryId   String
+  categoryName String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// Marca fija por prefijo de SKU para publicar en Mercado Libre — nació de
+/// un caso real: los productos EmersonGear (SKU que empieza con "EM") no
+/// tenían "Proveedor" cargado en Shopify, así que `buildCreateItemPayload`
+/// (@blacksand/core-domain) caía a la "Marca por defecto" de Configuración
+/// ("BLACK SAND SECURITY") en vez de la marca real del producto — el
+/// usuario pidió explícitamente una regla automática para que esto no
+/// vuelva a pasar con publicaciones NUEVAS (la corrección retroactiva de lo
+/// que ya estaba mal publicado es otra cosa, ver `meli-brand-fix.ts`,
+/// @blacksand/sync-engine, que no toca este modelo).
+///
+/// A propósito, esta regla PISA cualquier otra fuente de marca (incluido
+/// el vendor real de Shopify) cuando el SKU matchea — es la más específica
+/// de todas las fuentes posibles (marca de Shopify < "Marca por defecto"
+/// de Configuración < esto), porque el usuario la pidió así explícitamente
+/// ("se publica siempre con EmersonGear, tenga o no vendor cargado en
+/// Shopify"). Ver `matchSkuPrefixBrand` en @blacksand/core-domain.
+model MeliSkuPrefixBrandOverride {
+  id        String   @id @default(uuid())
+  /// Ej. "EM" — se compara contra el SKU sin distinguir mayúsculas/minúsculas
+  /// (`startsWith`, ver `matchSkuPrefixBrand`). Único para no guardar el
+  /// mismo prefijo dos veces con marcas distintas.
+  skuPrefix String   @unique
+  brand     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// "Precio normal" guardado de cada variante de Shopify — a pedido del
+/// usuario, para poder volver SIEMPRE a los precios normales después de
+/// subir/bajar precios en lote desde "Descuentos" (ver `bulk-discount.ts`,
+/// @blacksand/sync-engine). Una fila por variante de Shopify (`variantGid`).
+///
+/// - `baselinePrice`: el precio normal. Nunca lo cambia un descuento ni un
+///   aumento de la app; solo se vuelve a leer desde Shopify si alguien
+///   cambia el precio por fuera de la app (ver `syncBaselines`). Si un
+///   producto ya estaba en oferta al guardarlo, el precio normal es su
+///   "precio de comparación" (el precio de antes de la oferta).
+/// - `lastApplied*`/`prev*`: el último estado (precio y precio de
+///   comparación) que la app escribió en Shopify, y el estado justo anterior
+///   — sirven para distinguir "este precio lo dejó la app" (el precio normal
+///   sigue valiendo) de "alguien lo cambió a mano" (hay un precio normal
+///   nuevo). Se guarda también el anterior porque la fila se escribe ANTES de
+///   llamar a Shopify (si algo falla a mitad de camino, el estado real sigue
+///   siendo uno de los dos y no se confunde con un cambio externo).
+///
+/// El acceso es con SQL crudo (`price-baseline.repository.ts`), así que
+/// funciona sin regenerar el cliente de Prisma; la tabla se crea sola
+/// (migración `add_variant_price_baseline` y, por si la migración no corre,
+/// `ensureBaselineTable` en el propio repositorio).
+model VariantPriceBaseline {
+  variantGid           String   @id
+  productGid           String
+  productTitle         String
+  sku                  String?
+  baselinePrice        Float
+  lastAppliedPrice     Float?
+  lastAppliedCompareAt Float?
+  prevPrice            Float?
+  prevCompareAt        Float?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @default(now())
+}
+
+/// Token vivo de un canal (hoy solo Mercado Libre), compartido entre la app de
+/// escritorio y el worker en la nube que sincroniza 24/7 — ver el comentario
+/// de `channel-live-token.repository.ts`: el `refresh_token` de Mercado Libre
+/// es de un solo uso, así que hay UNA sola copia, y todo refresco se hace con
+/// la fila bloqueada (`SELECT ... FOR UPDATE`). Acceso con SQL crudo; la tabla
+/// se crea con la migración `add_channel_live_token` (o sola, al primer uso).
+model ChannelLiveToken {
+  channelCode  String   @id
+  accessToken  String
+  refreshToken String
+  userId       String?
+  expiresAt    DateTime
+  updatedAt    DateTime @default(now())
+}
+
+/// Turno de sondeo compartido entre la app de escritorio y el worker en la
+/// nube — ver `poll-lease.repository.ts`. Acceso con SQL crudo; se crea con la
+/// migración `add_poll_lease` (o sola, al primer uso).
+model PollLease {
+  key       String   @id
+  holder    String
+  expiresAt DateTime @db.Timestamptz
+}
+
+/// "Latido" del worker en la nube (cuándo corrió por última vez y si salió
+/// bien) — ver `worker-heartbeat.repository.ts`. SQL crudo; migración
+/// `add_worker_heartbeat` (o se crea sola al primer uso).
+model WorkerHeartbeat {
+  key         String    @id
+  lastRunAt   DateTime  @db.Timestamptz
+  lastOkAt    DateTime? @db.Timestamptz
+  lastSummary String?
+  lastError   String?
+}

@@ -1,0 +1,21 @@
+{
+  "name": "blacksand-manager",
+  "private": true,
+  "version": "0.1.0-fase1",
+  "description": "BLACK SAND Manager — sistema central de gestión multicanal (Shopify · Mercado Libre · Meta). Fase 1: cimiento (lectura + dashboard de sincronización).",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter=./packages/** build && pnpm --filter @blacksand/desktop build",
+    "typecheck": "pnpm -r run typecheck",
+    "dev:desktop": "pnpm --filter @blacksand/desktop dev",
+    "db:generate": "pnpm --filter @blacksand/db generate",
+    "db:migrate": "pnpm --filter @blacksand/db migrate",
+    "import:catalog": "pnpm --filter @blacksand/sync-engine run import",
+    "lint": "pnpm -r exec eslint . --ext .ts,.tsx"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@blacksand/cloud-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Worker en la nube: una pasada de sincronización de pedidos/stock entre Shopify y Mercado Libre, pensada para correr por cron (GitHub Actions) sin depender del PC.",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@blacksand/db": "workspace:*",
+    "@blacksand/sync-engine": "workspace:*",
+    "@blacksand/connector-shopify": "workspace:*",
+    "@blacksand/connector-mercadolibre": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.1",
+    "@types/node": "^22.7.4"
+  }
+}

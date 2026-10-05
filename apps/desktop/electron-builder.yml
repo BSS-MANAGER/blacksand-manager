@@ -1,0 +1,32 @@
+appId: cl.blacksand.manager
+productName: BLACK SAND Manager
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - "**/*.node"
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Firma de código (D.5 / J.1): configurar CSC_LINK / CSC_KEY_PASSWORD como
+  # variables de entorno del firmante antes de publicar una build real.
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+publish: null
+extraResources:
+  # Plantilla de BD ya migrada (ver scripts/build-template-db.mjs) — se copia
+  # a userData en el primer arranque (apps/desktop/src/main/db-bootstrap.ts).
+  # DEBE existir antes de correr electron-builder o el instalador quedará
+  # sin datos iniciales (la app sigue arrancando, solo con la advertencia
+  # de log documentada en db-bootstrap.ts).
+  - from: resources/blacksand.template.db
+    to: blacksand.template.db
+  # Esquema/migraciones de Prisma, por si en el futuro se agrega un runner
+  # de migraciones propio dentro de la app empaquetada (ver ADR-0001).
+  - from: ../../packages/db/prisma
+    to: prisma
