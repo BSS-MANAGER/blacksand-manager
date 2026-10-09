@@ -11,6 +11,7 @@ import AuditoriaPage from "./pages/AuditoriaPage";
 import AuditoriaStockPage from "./pages/AuditoriaStockPage";
 import DescuentosPage from "./pages/DescuentosPage";
 import PromocionesMeliPage from "./pages/PromocionesMeliPage";
+import DespachosPage from "./pages/DespachosPage";
 
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", end: true },
@@ -19,6 +20,7 @@ const NAV_ITEMS = [
   { to: "/promociones-meli", label: "Promociones ML" },
   { to: "/crear-producto", label: "Crear producto" },
   { to: "/ventas", label: "Venta presencial" },
+  { to: "/despachos", label: "Despachos" },
   { to: "/publicar-meli", label: "Publicar en ML" },
   { to: "/estado-meli", label: "Estado en ML" },
   { to: "/conciliacion", label: "Conciliación" },
@@ -63,6 +65,7 @@ export default function App() {
           <Route path="/promociones-meli" element={<PromocionesMeliPage />} />
           <Route path="/crear-producto" element={<CrearProductoPage />} />
           <Route path="/ventas" element={<VentasPage />} />
+          <Route path="/despachos" element={<DespachosPage />} />
           <Route path="/publicar-meli" element={<PublicarMeliPage />} />
           <Route path="/estado-meli" element={<EstadoMeliPage />} />
           <Route path="/conciliacion" element={<ConciliacionPage />} />

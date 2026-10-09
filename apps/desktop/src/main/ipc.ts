@@ -72,6 +72,7 @@ import {
   type MeliTokenSet,
 } from "@blacksand/connector-mercadolibre";
 import { readAppConfig, updateAppConfig } from "./config-store.js";
+import { registerShippingHandlers } from "./shipping-gmail.js";
 import { IPC_CHANNELS } from "../shared-ipc-types.js";
 import type {
   BackfillOrderNumbersResult,
@@ -435,6 +436,8 @@ function parseMeliOAuthPaste(pasted: string): { code: string | null; state: stri
 }
 
 export function registerIpcHandlers(): void {
+  registerShippingHandlers();
+
   ipcMain.handle(IPC_CHANNELS.dashboardGetSyncStatus, async (): Promise<DashboardRow[]> => {
     const rows = await listDashboardSyncStatus();
     return rows.map((r) => ({

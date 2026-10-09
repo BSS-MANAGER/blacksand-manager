@@ -52,7 +52,7 @@ interface VariantEditState {
   quantity: string;
   saving: boolean;
   error: string | null;
-  results: { channelCode: string; ok: boolean; error?: string; errorCode?: string }[] | null;
+  results: { channelCode: string; ok: boolean; error?: string; errorCode?: string; note?: string }[] | null;
 }
 
 function initialEditState(v: ProductVariantRow): VariantEditState {
@@ -545,6 +545,7 @@ export default function ProductosPage() {
                               >
                                 {r.ok ? "✅" : "❌"} {r.channelCode}
                                 {!r.ok && <ErrorDetailBadge code={r.errorCode} detail={r.error} />}
+                                {r.ok && r.note && <span style={{ color: "var(--warn)" }}>— {r.note}</span>}
                               </div>
                             ))}
                           </div>

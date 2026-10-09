@@ -120,6 +120,18 @@ const api: BlacksandApi = {
     listBaselines: () => ipcRenderer.invoke(IPC_CHANNELS.discountListBaselines),
     revert: (batchId: string) => ipcRenderer.invoke(IPC_CHANNELS.discountRevert, batchId),
   },
+  shipping: {
+    getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.shippingGetStatus),
+    saveGoogleClient: (input: { clientId: string; clientSecret: string }) =>
+      ipcRenderer.invoke(IPC_CHANNELS.shippingSaveGoogleClient, input),
+    connectGmail: () => ipcRenderer.invoke(IPC_CHANNELS.shippingConnectGmail),
+    disconnectGmail: () => ipcRenderer.invoke(IPC_CHANNELS.shippingDisconnectGmail),
+    sync: () => ipcRenderer.invoke(IPC_CHANNELS.shippingSync),
+    getMonth: (year: number, month: number) => ipcRenderer.invoke(IPC_CHANNELS.shippingGetMonth, year, month),
+    setDayOverride: (day: string, dispatched: boolean | null, note?: string | null) =>
+      ipcRenderer.invoke(IPC_CHANNELS.shippingSetDayOverride, day, dispatched, note),
+    setDailyRate: (rate: number) => ipcRenderer.invoke(IPC_CHANNELS.shippingSetDailyRate, rate),
+  },
   cloudWorker: {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.cloudWorkerStatus),
   },

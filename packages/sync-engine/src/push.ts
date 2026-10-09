@@ -57,6 +57,12 @@ export interface PushChannelResult {
    * disponible aparte como detalle (se abre a pedido).
    */
   errorCode?: string;
+  /**
+   * Aviso informativo (no es un error): por ejemplo "no se subió el stock porque
+   * la plataforma ya tenía menos/igual" — ver `readRemoteQuantity` y la regla
+   * "la app NUNCA sube stock" en `applyPatchToChannelMaps`.
+   */
+  note?: string;
 }
 
 /** Forma mínima que necesita el bucle de push — la que ya trae `getVariantWithChannelMap`. */
@@ -76,6 +82,46 @@ interface ChannelMapForPush {
    * vía `getVariantWithChannelMap`).
    */
   listingStatus?: string | null;
+}
+
+/**
+ * REGLA DE SEGURIDAD (pedido explícito del usuario, tras detectar aumentos
+ * erróneos de inventario en Shopify y Mercado Libre): la app NUNCA sube el
+ * stock de una plataforma — solo lo puede BAJAR (descontar por ventas). Antes
+ * de escribir una cantidad, se lee el stock REAL actual de esa publicación; si
+ * la cantidad a escribir es mayor o igual, no se escribe nada. Si no se puede
+ * leer el stock real, tampoco se escribe (ante la duda, no se toca).
+ *
+ * Esto cubre TODOS los caminos que empujan cantidades (ventas de canal y de
+ * mostrador, reintentos, cancelaciones con reposición, edición manual desde
+ * Productos, auditoría de stock): el número local de la app puede quedar
+ * desfasado, pero ya no se traduce en un aumento en las plataformas. Subir el
+ * stock (reposición real de mercadería) se hace a mano en Shopify / Mercado Libre.
+ */
+async function readRemoteQuantity(
+  channelCode: string,
+  client: ShopifyClient | MercadoLibreClient,
+  map: ChannelMapForPush,
+): Promise<number> {
+  if (channelCode === "shopify") {
+    const current = await (client as ShopifyClient).getVariantInventoryQuantity(map.channelVariantId || "");
+    if (current === null || current === undefined) {
+      throw new Error("no se pudo leer el stock actual en Shopify (variante sin seguimiento de inventario o inexistente)");
+    }
+    return current;
+  }
+  const item = await (client as MercadoLibreClient).getItem(map.channelProductId);
+  if (map.channelVariantId) {
+    const variation = item.variations.find((v) => v.channelVariantId === map.channelVariantId);
+    if (!variation || variation.availableQuantity === null) {
+      throw new Error("no se pudo leer el stock actual de la variación en Mercado Libre");
+    }
+    return variation.availableQuantity;
+  }
+  if (item.availableQuantity === null) {
+    throw new Error("no se pudo leer el stock actual en Mercado Libre");
+  }
+  return item.availableQuantity;
 }
 
 /**
@@ -107,6 +153,26 @@ async function applyPatchToChannelMaps(
     }
 
     try {
+      // Regla "nunca subir stock": se decide ANTES de tocar nada qué cantidad (si alguna) se puede escribir.
+      let quantityToWrite: number | undefined = patch.quantity;
+      let note: string | undefined;
+      if (quantityToWrite !== undefined) {
+        let remoteQuantity: number;
+        try {
+          remoteQuantity = await readRemoteQuantity(channelCode, client, map);
+        } catch (readErr) {
+          const reason = readErr instanceof Error ? readErr.message : String(readErr);
+          throw new Error(`No se modificó el stock: ${reason}. (Por seguridad la app no escribe stock sin poder verificar el valor actual.)`);
+        }
+        if (quantityToWrite >= remoteQuantity) {
+          note =
+            quantityToWrite === remoteQuantity
+              ? `El stock en ${channelDisplayName(channelCode)} ya es ${remoteQuantity}; no se cambió.`
+              : `El stock en ${channelDisplayName(channelCode)} es ${remoteQuantity} y la app tenía ${quantityToWrite}: la app nunca sube stock, no se cambió nada. Si de verdad hay más unidades, súbelas a mano en ${channelDisplayName(channelCode)}.`;
+          quantityToWrite = undefined;
+        }
+      }
+
       if (channelCode === "shopify") {
         const shopify = client as ShopifyClient;
         if (patch.sku !== undefined || patch.price !== undefined) {
@@ -115,17 +181,17 @@ async function applyPatchToChannelMaps(
             sku: patch.sku,
           });
         }
-        if (patch.quantity !== undefined) {
-          await shopify.setVariantInventoryQuantity(map.channelVariantId || "", patch.quantity);
+        if (quantityToWrite !== undefined) {
+          await shopify.setVariantInventoryQuantity(map.channelVariantId || "", quantityToWrite);
         }
       } else if (channelCode === "mercadolibre") {
         const meli = client as MercadoLibreClient;
         if (patch.price !== undefined) {
           await meli.updateItemPrice(map.channelProductId, patch.price);
         }
-        if (patch.quantity !== undefined || patch.sku !== undefined) {
+        if (quantityToWrite !== undefined || patch.sku !== undefined) {
           await meli.updateItemStockAndSku(map.channelProductId, map.channelVariantId || null, {
-            availableQuantity: patch.quantity,
+            availableQuantity: quantityToWrite,
             sku: patch.sku,
           });
         }
@@ -183,8 +249,8 @@ async function applyPatchToChannelMaps(
          * desde "Estado en Mercado Libre" si esto no alcanza.
          */
         if (
-          patch.quantity !== undefined &&
-          patch.quantity > 0 &&
+          quantityToWrite !== undefined &&
+          quantityToWrite > 0 &&
           (map.listingStatus === "paused" || map.listingStatus === "under_review")
         ) {
           try {
@@ -212,7 +278,7 @@ async function applyPatchToChannelMaps(
         channelId: map.channelId,
         status: "sincronizado",
       });
-      results.push({ channelCode, ok: true });
+      results.push({ channelCode, ok: true, ...(note ? { note } : {}) });
     } catch (err) {
       // `describeMeliError` reescribe casos conocidos de la API de Mercado
       // Libre (ej. publicación "en revisión" que rechaza cambios de stock)

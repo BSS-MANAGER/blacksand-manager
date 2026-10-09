@@ -14,3 +14,4 @@ export * from "./meli-duplicate-fix.js";
 export * from "./bulk-discount.js";
 export * from "./meli-token.js";
 export * from "./poll-lease.js";
+export * from "./shipping.js";

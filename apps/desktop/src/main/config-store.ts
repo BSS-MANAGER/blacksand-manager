@@ -43,6 +43,14 @@ export interface AppConfig {
   orderPolling?: {
     lastPollAt?: string;
   };
+  /** Registro de días de despacho leyendo Gmail (solo lectura). El secreto y el refresh token van en la bóveda. */
+  gmail?: {
+    clientId: string;
+    clientSecretRef?: string;
+    refreshTokenRef?: string;
+    email?: string;
+    lastSyncAt?: string;
+  };
 }
 
 function configPath(): string {

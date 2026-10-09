@@ -93,6 +93,8 @@ export interface ProductUpdateChannelResult {
   error?: string;
   /** Código corto del error — ver `@blacksand/shared/sync-error-codes.ts`. */
   errorCode?: string;
+  /** Aviso informativo (ej. "la app nunca sube stock, no se cambió nada"). */
+  note?: string;
 }
 
 export interface ProductUpdateResult {
@@ -961,6 +963,20 @@ export interface BlacksandApi {
     /** Restaura precio y precio de comparación de antes del descuento (solo variantes cuyo precio sigue siendo el del descuento). */
     revert(batchId: string): Promise<DiscountRevertResult>;
   };
+  shipping: {
+    getStatus(): Promise<ShippingGmailStatus>;
+    /** Guarda el ID de cliente y el secreto de la app de Google Cloud del usuario (el secreto va a la bóveda). */
+    saveGoogleClient(input: { clientId: string; clientSecret: string }): Promise<ShippingGmailStatus>;
+    /** Abre el navegador para autorizar el acceso de SOLO LECTURA a Gmail; resuelve cuando el usuario termina. */
+    connectGmail(): Promise<ShippingGmailStatus>;
+    disconnectGmail(): Promise<ShippingGmailStatus>;
+    /** Lee los correos nuevos de Blue Express / Mercado Libre y registra los días de despacho. */
+    sync(): Promise<ShippingSyncResult>;
+    getMonth(year: number, month: number): Promise<ShippingMonthSummaryDto>;
+    /** `dispatched = null` quita el ajuste manual de ese día. */
+    setDayOverride(day: string, dispatched: boolean | null, note?: string | null): Promise<{ ok: true }>;
+    setDailyRate(rate: number): Promise<{ ok: true }>;
+  };
   cloudWorker: {
     /** Cuándo corrió por última vez el worker de sincronización en la nube y si salió bien. */
     getStatus(): Promise<CloudWorkerStatus | null>;
@@ -969,6 +985,48 @@ export interface BlacksandApi {
     /** SOLO LECTURA: consulta las promociones de la cuenta de Mercado Libre para comprobar que la app tiene acceso al área de Promociones. */
     probe(): Promise<MeliPromotionsProbeResult>;
   };
+}
+
+export interface ShippingGmailStatus {
+  clientConfigured: boolean;
+  clientId: string | null;
+  connected: boolean;
+  email: string | null;
+  lastSyncAt: string | null;
+  dailyRate: number;
+}
+
+export interface ShippingSyncResult {
+  /** Correos que coinciden con la búsqueda en Gmail. */
+  found: number;
+  /** De esos, cuántos no se habían leído antes. */
+  newEmails: number;
+  /** Cuántos resultaron ser comprobantes de despacho válidos. */
+  newEvents: number;
+  ignored: number;
+  syncedAt: string;
+}
+
+export interface ShippingDayDto {
+  day: string; // YYYY-MM-DD
+  dispatched: boolean;
+  fromEmails: boolean;
+  carriers: ("BLUE_EXPRESS" | "MERCADO_LIBRE")[];
+  packages: number;
+  /** Detalle por correo: transportista, paquetes y números de orden de servicio (BX) / de venta (ML). */
+  events: { carrier: "BLUE_EXPRESS" | "MERCADO_LIBRE"; packages: number; refs: string[] }[];
+  override: boolean | null;
+  note: string | null;
+}
+
+export interface ShippingMonthSummaryDto {
+  year: number;
+  month: number;
+  daysInMonth: number;
+  dispatchedDays: number;
+  dailyRate: number;
+  amount: number;
+  days: ShippingDayDto[];
 }
 
 export const IPC_CHANNELS = {
@@ -1029,4 +1087,12 @@ export const IPC_CHANNELS = {
   discountRevert: "discount:revert",
   meliPromotionsProbe: "meliPromotions:probe",
   cloudWorkerStatus: "cloudWorker:status",
+  shippingGetStatus: "shipping:getStatus",
+  shippingSaveGoogleClient: "shipping:saveGoogleClient",
+  shippingConnectGmail: "shipping:connectGmail",
+  shippingDisconnectGmail: "shipping:disconnectGmail",
+  shippingSync: "shipping:sync",
+  shippingGetMonth: "shipping:getMonth",
+  shippingSetDayOverride: "shipping:setDayOverride",
+  shippingSetDailyRate: "shipping:setDailyRate",
 } as const;

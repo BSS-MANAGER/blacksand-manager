@@ -13,3 +13,4 @@ export * from "./repositories/price-baseline.repository.js";
 export * from "./repositories/channel-live-token.repository.js";
 export * from "./repositories/poll-lease.repository.js";
 export * from "./repositories/worker-heartbeat.repository.js";
+export * from "./repositories/shipping.repository.js";
